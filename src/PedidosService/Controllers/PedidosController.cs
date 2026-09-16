@@ -1,9 +1,9 @@
-﻿using System.Security.Claims;
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PedidosService.Data;
 using PedidosService.Models;
+using PedidosService.Services;
 
 namespace PedidosService.Controllers;
 
@@ -12,10 +12,12 @@ namespace PedidosService.Controllers;
 public class PedidosController : ControllerBase
 {
     private readonly PedidosDbContext _db;
+    private readonly IGeocodingService _geocoding;
 
-    public PedidosController(PedidosDbContext db)
+    public PedidosController(PedidosDbContext db, IGeocodingService geocoding)
     {
         _db = db;
+        _geocoding = geocoding;
     }
 
     // GET /api/pedidos — listado completo (Administrador)
@@ -53,21 +55,37 @@ public class PedidosController : ControllerBase
     }
 
     // POST /api/pedidos — crear pedido (Administrador)
+    // Geocodifica origen y destino con Nominatim, calcula distancia (Haversine)
+    // y el costo de envío (costo base + tarifa por km).
     [HttpPost]
     [Authorize(Roles = "Administrador")]
     public async Task<IActionResult> Crear(CrearPedidoRequest request)
     {
+        var origen = await _geocoding.GeocodificarAsync(request.DireccionOrigen);
+        if (origen is null)
+            return BadRequest($"No se pudo geocodificar la dirección de origen: '{request.DireccionOrigen}'");
+
+        var destino = await _geocoding.GeocodificarAsync(request.DireccionDestino);
+        if (destino is null)
+            return BadRequest($"No se pudo geocodificar la dirección de destino: '{request.DireccionDestino}'");
+
+        var distanciaKm = CalculadoraEnvio.DistanciaEnKm(origen, destino);
+        var costoEnvio = CalculadoraEnvio.CalcularCosto(distanciaKm);
+
         var estadoPendiente = await _db.Estados.FirstAsync(e => e.Nombre == "Pendiente");
 
         var pedido = new Pedido
         {
-            Direccion = request.Direccion,
-            Latitud = request.Latitud,
-            Longitud = request.Longitud,
+            OrigenDireccion = request.DireccionOrigen,
+            OrigenLatitud = origen.Latitud,
+            OrigenLongitud = origen.Longitud,
+            Direccion = request.DireccionDestino,
+            Latitud = destino.Latitud,
+            Longitud = destino.Longitud,
             ClienteNombre = request.ClienteNombre,
             ClienteTelefono = request.ClienteTelefono,
             EstadoId = estadoPendiente.Id,
-            CostoEnvio = 0 // se calculará más adelante con la integración externa de geocoding
+            CostoEnvio = costoEnvio
         };
 
         _db.Pedidos.Add(pedido);

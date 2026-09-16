@@ -7,6 +7,10 @@ public class Pedido
     public double Latitud { get; set; }
     public double Longitud { get; set; }
 
+    public string OrigenDireccion { get; set; } = string.Empty;
+    public double OrigenLatitud { get; set; }
+    public double OrigenLongitud { get; set; }
+
     public int EstadoId { get; set; }
     public Estado Estado { get; set; } = null!;
 
@@ -15,6 +19,8 @@ public class Pedido
 
     public string ClienteNombre { get; set; } = string.Empty;
     public string ClienteTelefono { get; set; } = string.Empty;
+
+
 
     // Referencia lógica al Usuario.Id de AuthService (rol Repartidor).
     // Sin FK física: el desacoplamiento entre bases se resuelve a nivel aplicación,
