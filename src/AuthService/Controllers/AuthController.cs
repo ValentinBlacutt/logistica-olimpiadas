@@ -4,8 +4,10 @@ using AuthService.Models;
 using AuthService.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using AuthService.Models;
 
 namespace AuthService.Controllers;
 
@@ -24,7 +26,7 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("login")]
-    public async Task<ActionResult<LoginResponse>> Login(LoginRequest request)
+    public async Task<ActionResult<LoginResponse>> Login(AuthService.Models.LoginRequest request)
     {
         var usuario = await _db.Usuarios
             .Include(u => u.Rol)
@@ -40,6 +42,33 @@ public class AuthController : ControllerBase
         var (token, expiresAt) = _tokenService.GenerarToken(usuario);
 
         return Ok(new LoginResponse { Token = token, ExpiresAt = expiresAt });
+    }
+
+    [HttpPost("registro")]
+    [Authorize(Roles = "Administrador")]
+    public async Task<ActionResult<UsuarioResponseDto>> Registro(RegistroRequest request)
+    {
+        var existe = await _db.Usuarios.AnyAsync(u => u.Email == request.Email);
+        if (existe)
+            return Conflict("Ya existe un usuario con ese email.");
+
+        var rol = await _db.Roles.FirstOrDefaultAsync(r => r.Nombre == request.Rol);
+        if (rol is null)
+            return BadRequest($"El rol '{request.Rol}' no existe. Roles válidos: Administrador, Repartidor.");
+
+        var usuario = new Usuario
+        {
+            Email = request.Email,
+            RolId = rol.Id
+        };
+        usuario.PasswordHash = _hasher.HashPassword(usuario, request.Password);
+
+        _db.Usuarios.Add(usuario);
+        await _db.SaveChangesAsync();
+
+        usuario.Rol = rol; // ya lo tenemos en memoria, evita un round-trip a la DB
+
+        return CreatedAtAction(nameof(Yo), UsuarioResponseDto.FromUsuario(usuario));
     }
 
     [HttpGet("yo")]

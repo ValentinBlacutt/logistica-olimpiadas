@@ -158,4 +158,33 @@ public class PedidosController : ControllerBase
         await _db.SaveChangesAsync();
         return NoContent();
     }
+
+    // GET /api/pedidos/mis-pedidos/ruta-optima?latActual=&lonActual=
+    // Devuelve los pedidos pendientes del repartidor, reordenados por la ruta más corta.
+    [HttpGet("mis-pedidos/ruta-optima")]
+    [Authorize(Roles = "Repartidor")]
+    public async Task<IActionResult> RutaOptima([FromQuery] double? latActual, [FromQuery] double? lonActual)
+    {
+        var repartidorId = int.Parse(User.FindFirst("repartidor_id")!.Value);
+
+        var pedidos = await _db.Pedidos
+            .Include(p => p.Estado)
+            .Where(p => p.RepartidorId == repartidorId
+                && p.Estado.Nombre != "Entregado"
+                && p.Estado.Nombre != "Cancelado")
+            .ToListAsync();
+
+        if (pedidos.Count == 0)
+            return Ok(Array.Empty<PedidoResponseDto>());
+
+        // Si no mandan la posición actual del repartidor, arrancamos
+        // desde el origen del primer pedido como aproximación.
+        var puntoInicial = (latActual.HasValue && lonActual.HasValue)
+            ? new Coordenadas(latActual.Value, lonActual.Value)
+            : new Coordenadas(pedidos[0].OrigenLatitud, pedidos[0].OrigenLongitud);
+
+        var ordenados = OptimizadorRuta.OrdenarPorRutaOptima(pedidos, puntoInicial);
+
+        return Ok(ordenados.Select(PedidoResponseDto.FromPedido));
+    }
 }
