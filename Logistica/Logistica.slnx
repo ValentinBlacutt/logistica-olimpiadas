@@ -3,4 +3,5 @@
   <Project Path="../src/Gateway/Gateway.csproj" />
   <Project Path="../src/PedidosService/PedidosService.csproj" />
   <Project Path="../tests/AuthService.Tests/AuthService.Tests.csproj" />
+  <Project Path="../tests/PedidosService.Tests/PedidosService.Tests.csproj" />
 </Solution>
