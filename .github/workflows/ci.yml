@@ -5,3 +5,25 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restaurar dependencias
+        run: dotnet restore Logistica/Logistica.slnx
+
+      - name: Compilar solución
+        run: dotnet build Logistica/Logistica.slnx --configuration Release --no-restore
+
+      - name: Correr tests
+        run: dotnet test Logistica/Logistica.slnx --configuration Release --no-build
