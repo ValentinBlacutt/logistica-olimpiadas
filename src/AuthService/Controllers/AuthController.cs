@@ -70,6 +70,19 @@ public class AuthController : ControllerBase
         return CreatedAtAction(nameof(Yo), UsuarioResponseDto.FromUsuario(usuario));
     }
 
+    [HttpGet("repartidores")]
+    [Authorize(Roles = "Administrador")]
+    public async Task<IActionResult> ListarRepartidores()
+    {
+        var repartidores = await _db.Usuarios
+            .Include(u => u.Rol)
+            .Where(u => u.Rol.Nombre == "Repartidor")
+            .Select(u => new { u.Id, u.Email })
+            .ToListAsync();
+
+        return Ok(repartidores);
+    }
+
     [HttpGet("yo")]
     [Authorize]
     public IActionResult Yo()
