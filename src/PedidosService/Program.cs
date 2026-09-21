@@ -5,19 +5,30 @@ using Microsoft.IdentityModel.Tokens;
 using PedidosService.Data;
 using PedidosService.Services;
 
-
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// 1. Servicios básicos
+builder.Services.AddControllers();
+builder.Services.AddMemoryCache();
+builder.Services.AddOpenApi();
 
+// 2. Base de Datos SQL Server
 builder.Services.AddDbContext<PedidosDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+// 3. Servicios HTTP
 builder.Services.AddHttpClient<IGeocodingService, NominatimGeocodingService>();
 
+// Cliente HTTP configurado para la API de Groq
+builder.Services.AddHttpClient<IAsistenteService, AsistenteIAService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.groq.com/openai/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+
+builder.Services.AddScoped<ContextoAsistenteBuilder>();
+
+// 4. JWT
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -37,7 +48,6 @@ builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -46,7 +56,6 @@ if (app.Environment.IsDevelopment())
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PedidosDbContext>();
-
     if (db.Database.IsRelational())
         db.Database.Migrate();
     else
@@ -54,10 +63,8 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseHttpsRedirection();
-
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapControllers();
 
 app.Run();

@@ -38,7 +38,10 @@ services:
       sqlserver:
         condition: service_healthy
     environment:
+      environment:
       ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=PedidosDb;User=sa;Password=TuPassword123!;TrustServerCertificate=True"
+      Ia__ApiKey: "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"
+      Ia__Modelo: "openai/gpt-oss-20b"
     ports:
       - "5002:8080"
 

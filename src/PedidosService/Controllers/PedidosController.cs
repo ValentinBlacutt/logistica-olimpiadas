@@ -1,11 +1,15 @@
 ﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using PedidosService.Data;
 using PedidosService.Models;
 using PedidosService.Services;
 
 namespace PedidosService.Controllers;
+
+public record PreguntaIARequest(string Pregunta);
 
 [ApiController]
 [Route("api/[controller]")]
@@ -13,14 +17,25 @@ public class PedidosController : ControllerBase
 {
     private readonly PedidosDbContext _db;
     private readonly IGeocodingService _geocoding;
+    private readonly IAsistenteService _asistente;
+    private readonly ContextoAsistenteBuilder _contextoBuilder;
+    private readonly IMemoryCache _cache;
 
-    public PedidosController(PedidosDbContext db, IGeocodingService geocoding)
+    public PedidosController(
+        PedidosDbContext db,
+        IGeocodingService geocoding,
+        IAsistenteService asistente,
+        ContextoAsistenteBuilder contextoBuilder,
+        IMemoryCache cache)
     {
         _db = db;
         _geocoding = geocoding;
+        _asistente = asistente;
+        _contextoBuilder = contextoBuilder;
+        _cache = cache;
     }
 
-    // GET /api/pedidos — listado completo (Administrador)
+    // GET /api/pedidos
     [HttpGet]
     [Authorize(Roles = "Administrador")]
     public async Task<IActionResult> Listar()
@@ -29,7 +44,7 @@ public class PedidosController : ControllerBase
         return Ok(pedidos.Select(PedidoResponseDto.FromPedido));
     }
 
-    // GET /api/pedidos/mis-pedidos — pedidos asignados al repartidor autenticado
+    // GET /api/pedidos/mis-pedidos
     [HttpGet("mis-pedidos")]
     [Authorize(Roles = "Repartidor")]
     public async Task<IActionResult> MisPedidos()
@@ -44,7 +59,7 @@ public class PedidosController : ControllerBase
         return Ok(pedidos.Select(PedidoResponseDto.FromPedido));
     }
 
-    // GET /api/pedidos/{id} — detalle de un pedido
+    // GET /api/pedidos/{id}
     [HttpGet("{id}")]
     [Authorize]
     public async Task<IActionResult> Detalle(int id)
@@ -54,9 +69,7 @@ public class PedidosController : ControllerBase
         return Ok(PedidoResponseDto.FromPedido(pedido));
     }
 
-    // POST /api/pedidos — crear pedido (Administrador)
-    // Geocodifica origen y destino con Nominatim, calcula distancia (Haversine)
-    // y el costo de envío (costo base + tarifa por km).
+    // POST /api/pedidos
     [HttpPost]
     [Authorize(Roles = "Administrador")]
     public async Task<IActionResult> Crear(CrearPedidoRequest request)
@@ -91,12 +104,12 @@ public class PedidosController : ControllerBase
         _db.Pedidos.Add(pedido);
         await _db.SaveChangesAsync();
 
-        pedido.Estado = estadoPendiente; // ya lo tenemos en memoria, evita un round-trip a la DB
+        pedido.Estado = estadoPendiente;
 
         return CreatedAtAction(nameof(Detalle), new { id = pedido.Id }, PedidoResponseDto.FromPedido(pedido));
     }
 
-    // POST /api/pedidos/{id}/asignar — asignar repartidor (Administrador)
+    // POST /api/pedidos/{id}/asignar
     [HttpPost("{id}/asignar")]
     [Authorize(Roles = "Administrador")]
     public async Task<IActionResult> AsignarRepartidor(int id, AsignarRepartidorRequest request)
@@ -116,7 +129,7 @@ public class PedidosController : ControllerBase
         return Ok(PedidoResponseDto.FromPedido(pedido));
     }
 
-    // PUT /api/pedidos/{id}/estado — actualizar estado (Administrador o el Repartidor asignado)
+    // PUT /api/pedidos/{id}/estado
     [HttpPut("{id}/estado")]
     [Authorize(Roles = "Administrador,Repartidor")]
     public async Task<IActionResult> ActualizarEstado(int id, ActualizarEstadoRequest request)
@@ -124,7 +137,6 @@ public class PedidosController : ControllerBase
         var pedido = await _db.Pedidos.FindAsync(id);
         if (pedido is null) return NotFound();
 
-        // Si es Repartidor, solo puede tocar sus propios pedidos asignados.
         if (User.IsInRole("Repartidor"))
         {
             var repartidorId = int.Parse(User.FindFirst("repartidor_id")!.Value);
@@ -144,7 +156,7 @@ public class PedidosController : ControllerBase
         return Ok(PedidoResponseDto.FromPedido(pedido));
     }
 
-    // DELETE /api/pedidos/{id} — cancelar pedido (Administrador). No borra físicamente, cambia el estado.
+    // DELETE /api/pedidos/{id}
     [HttpDelete("{id}")]
     [Authorize(Roles = "Administrador")]
     public async Task<IActionResult> Cancelar(int id)
@@ -159,8 +171,7 @@ public class PedidosController : ControllerBase
         return NoContent();
     }
 
-    // GET /api/pedidos/mis-pedidos/ruta-optima?latActual=&lonActual=
-    // Devuelve los pedidos pendientes del repartidor, reordenados por la ruta más corta.
+    // GET /api/pedidos/mis-pedidos/ruta-optima
     [HttpGet("mis-pedidos/ruta-optima")]
     [Authorize(Roles = "Repartidor")]
     public async Task<IActionResult> RutaOptima([FromQuery] double? latActual, [FromQuery] double? lonActual)
@@ -177,8 +188,6 @@ public class PedidosController : ControllerBase
         if (pedidos.Count == 0)
             return Ok(Array.Empty<PedidoResponseDto>());
 
-        // Si no mandan la posición actual del repartidor, arrancamos
-        // desde el origen del primer pedido como aproximación.
         var puntoInicial = (latActual.HasValue && lonActual.HasValue)
             ? new Coordenadas(latActual.Value, lonActual.Value)
             : new Coordenadas(pedidos[0].OrigenLatitud, pedidos[0].OrigenLongitud);
@@ -186,5 +195,88 @@ public class PedidosController : ControllerBase
         var ordenados = OptimizadorRuta.OrdenarPorRutaOptima(pedidos, puntoInicial);
 
         return Ok(ordenados.Select(PedidoResponseDto.FromPedido));
+    }
+
+    // POST /api/pedidos/asistente-ia — Consulta tradicional en bloque
+    [HttpPost("asistente-ia")]
+    [Authorize(Roles = "Administrador")]
+    public async Task<IActionResult> AsistenteIA([FromBody] PreguntaIARequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Pregunta))
+            return BadRequest(new { error = "La pregunta no puede estar vacía." });
+
+        try
+        {
+            var contexto = await ObtenerContextoConCacheAsync();
+            var respuesta = await _asistente.ConsultarAsync(request.Pregunta, contexto);
+            return Ok(new { respuesta });
+        }
+        catch (TimeoutException)
+        {
+            return StatusCode(StatusCodes.Status504GatewayTimeout, new
+            {
+                error = "El servicio de IA tardó demasiado en responder. Intente nuevamente."
+            });
+        }
+        catch (HttpRequestException)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "El servicio de IA no está disponible temporalmente por alta demanda."
+            });
+        }
+        catch (Exception)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, new
+            {
+                error = "Ocurrió un error inesperado al procesar la solicitud con el asistente."
+            });
+        }
+    }
+
+    // POST /api/pedidos/asistente-ia/stream — Streaming por Server-Sent Events (SSE)
+    [HttpPost("asistente-ia/stream")]
+    [Authorize(Roles = "Administrador")]
+    public async Task ConsultarStream([FromBody] PreguntaIARequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Pregunta))
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsync("La pregunta no puede estar vacía.", cancellationToken);
+            return;
+        }
+
+        Response.ContentType = "text/event-stream";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers.Connection = "keep-alive";
+
+        try
+        {
+            var contexto = await ObtenerContextoConCacheAsync();
+
+            await foreach (var chunk in _asistente.ConsultarStreamAsync(request.Pregunta, contexto, cancellationToken))
+            {
+                await Response.WriteAsync($"data: {chunk.Replace("\n", "\\n")}\n\n", cancellationToken);
+                await Response.Body.FlushAsync(cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // El usuario canceló la request HTTP / cerró la solapa del navegador
+        }
+        catch (Exception)
+        {
+            await Response.WriteAsync("data: [ERROR_IA_TEMPORAL]\n\n", cancellationToken);
+            await Response.Body.FlushAsync(cancellationToken);
+        }
+    }
+
+    private Task<string> ObtenerContextoConCacheAsync()
+    {
+        return _cache.GetOrCreateAsync("contexto-asistente-ia", async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+            return await _contextoBuilder.ConstruirAsync();
+        })!;
     }
 }
