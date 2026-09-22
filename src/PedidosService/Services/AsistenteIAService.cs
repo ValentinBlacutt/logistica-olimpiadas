@@ -27,7 +27,6 @@ public class AsistenteIAService : IAsistenteService
                             ?? configuration["Groq:Modelo"]
                             ?? "openai/gpt-oss-20b";
 
-        // Autenticación Bearer Token requerida por Groq
         _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
     }
 
@@ -47,8 +46,24 @@ public class AsistenteIAService : IAsistenteService
         using var doc = await response.Content.ReadFromJsonAsync<JsonDocument>();
         var root = doc?.RootElement;
 
-        return root?.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString()
-               ?? "No se pudo obtener una respuesta válida.";
+        var choice = root?.GetProperty("choices")[0];
+        var finishReason = choice?.GetProperty("finish_reason").GetString();
+        var contenido = choice?.GetProperty("message").GetProperty("content").GetString();
+
+        if (string.IsNullOrWhiteSpace(contenido))
+        {
+            // Con modelos de razonamiento (gpt-oss-20b), un finish_reason "length"
+            // suele significar que el presupuesto de tokens se gastó pensando
+            // y no quedó nada para el texto final.
+            _logger.LogWarning(
+                "Respuesta vacía de Groq. finish_reason={FinishReason} | Pregunta={Pregunta}",
+                finishReason, pregunta);
+
+            return "No pude generar una respuesta completa para esa consulta. " +
+                   "Probá reformularla de forma más simple o específica.";
+        }
+
+        return contenido;
     }
 
     // Consulta por Streaming Server-Sent Events (SSE)
@@ -76,6 +91,9 @@ public class AsistenteIAService : IAsistenteService
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream, Encoding.UTF8);
 
+        bool huboContenido = false;
+        string? ultimoFinishReason = null;
+
         while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
         {
             var line = await reader.ReadLineAsync(cancellationToken);
@@ -91,10 +109,21 @@ public class AsistenteIAService : IAsistenteService
                 var choices = doc.RootElement.GetProperty("choices");
                 if (choices.GetArrayLength() > 0)
                 {
-                    var delta = choices[0].GetProperty("delta");
+                    var choice = choices[0];
+                    var delta = choice.GetProperty("delta");
+
+                    // El modelo de razonamiento puede mandar un campo "reasoning"
+                    // separado de "content" — lo ignoramos a propósito para que
+                    // no se filtre al chat.
                     if (delta.TryGetProperty("content", out var contentProp))
                     {
                         textoProcesado = contentProp.GetString();
+                    }
+
+                    if (choice.TryGetProperty("finish_reason", out var finishProp) &&
+                        finishProp.ValueKind == JsonValueKind.String)
+                    {
+                        ultimoFinishReason = finishProp.GetString();
                     }
                 }
             }
@@ -105,8 +134,19 @@ public class AsistenteIAService : IAsistenteService
 
             if (!string.IsNullOrEmpty(textoProcesado))
             {
+                huboContenido = true;
                 yield return textoProcesado;
             }
+        }
+
+        if (!huboContenido)
+        {
+            _logger.LogWarning(
+                "Stream de Groq sin contenido. finish_reason={FinishReason} | Pregunta={Pregunta}",
+                ultimoFinishReason, pregunta);
+
+            yield return "No pude generar una respuesta completa para esa consulta. " +
+                         "Probá reformularla de forma más simple o específica.";
         }
     }
 
@@ -115,22 +155,28 @@ public class AsistenteIAService : IAsistenteService
         model = modelo,
         stream = stream,
         messages = new[]
-     {
-        new
         {
-            role = "system",
-            content = "Sos un asistente exclusivo de logística y gestión de pedidos. " +
-                      "Responde ÚNICAMENTE sobre el estado, detalles y datos operativos de los pedidos provistos en el contexto. " +
-                      "Si el usuario pregunta sobre temas ajenos (deportes, noticias, historia, temas generales u otros personajes), " +
-                      "rechaza amablemente la solicitud indicando que solo podés responder sobre la gestión de pedidos."
+            new
+            {
+                role = "system",
+                content = "Sos un asistente exclusivo de logística y gestión de pedidos. " +
+                          "Respondé ÚNICAMENTE sobre el estado, detalles y datos operativos de los pedidos provistos en el contexto. " +
+                          "Si el usuario pregunta sobre temas ajenos (deportes, noticias, historia, temas generales u otros personajes), " +
+                          "rechazá amablemente la solicitud indicando que solo podés responder sobre la gestión de pedidos. " +
+                          "IMPORTANTE SOBRE EL FORMATO: respondé siempre en texto plano, como en un chat normal, sin Markdown, " +
+                          "sin guiones ni asteriscos, sin títulos ni listas con viñetas. Si necesitás mencionar varios pedidos, " +
+                          "hacelo en una oración separada por comas, no en líneas separadas. Sé breve y directo. " +
+                          "Si el contexto ya incluye totales o conteos, usalos directamente en vez de contar vos mismo."
+            },
+            new
+            {
+                role = "user",
+                content = $"DATOS:\n{contextoDatos}\n\nPREGUNTA: {pregunta}"
+            }
         },
-        new
-        {
-            role = "user",
-            content = $"DATOS:\n{contextoDatos}\n\nPREGUNTA: {pregunta}"
-        }
-    },
-        temperature = 0.1, // Temperatura baja para evitar alucinaciones
-        max_tokens = 400
+        temperature = 0.1,
+        max_tokens = 1200,          // antes 400: el razonamiento del modelo se comía el presupuesto y dejaba content vacío
+        reasoning_effort = "low",   // limita cuánto "piensa" antes de responder, evita gastar todo el budget ahí
+        reasoning_format = "hidden" // que no devuelva el razonamiento mezclado en el content/stream
     };
 }
